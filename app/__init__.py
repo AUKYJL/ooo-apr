@@ -1,0 +1,1 @@
+"""Document search application package."""

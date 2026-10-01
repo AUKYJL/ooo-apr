@@ -1,0 +1,104 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-documents}
+      POSTGRES_USER: ${POSTGRES_USER:-documents}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documents}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      target: base
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-documents}:${POSTGRES_PASSWORD:-documents}@postgres:5432/${POSTGRES_DB:-documents}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-documents}:${POSTGRES_PASSWORD:-documents}@postgres:5432/${POSTGRES_DB:-documents}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    build: .
+    command: python -m app.scripts.import_data --path /app/data/posts.csv --replace
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-documents}:${POSTGRES_PASSWORD:-documents}@postgres:5432/${POSTGRES_DB:-documents}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  postgres-test:
+    profiles: ["test"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: documents_test
+      POSTGRES_USER: documents
+      POSTGRES_PASSWORD: documents
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    command: sh -c "alembic upgrade head && pytest"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://documents:documents@postgres-test:5432/documents_test
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: functional-documents
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  elasticsearch_data:
